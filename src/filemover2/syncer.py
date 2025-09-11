@@ -16,7 +16,7 @@ from datetime import datetime
 from watchdog.events import FileSystemEventHandler, FileSystemEvent, FileCreatedEvent, FileModifiedEvent, FileMovedEvent, FileDeletedEvent, DirCreatedEvent, DirMovedEvent, DirDeletedEvent
 from watchdog.observers import Observer
 
-from .organizer import organize_by_mtime_multi
+from .organizer import organize_by_mtime_multi_async
 from .logging_setup import get_log_file
 
 logger = logging.getLogger(__name__)
@@ -367,11 +367,13 @@ class SyncEventHandler(FileSystemEventHandler):
 			if count >= self.auto_threshold:
 				logger.info("auto organize triggered: %d >= %d (base=%s)", count, self.auto_threshold, base)
 				# 使用与配置一致的参数进行自动整理
-				organize_by_mtime_multi(
+				import asyncio
+				stats = asyncio.run(organize_by_mtime_multi_async(
 					[base], 
 					chunk_size=self.auto_threshold, 
 					prefix=self.auto_prefix, 
 					dry_run=False,
+					concurrency=4,  # 自动整理使用较低的并发数
 					keep_source=self._keep_source,
 					dedup_strategy=getattr(self, '_dedup_strategy', 'rename'),
 					name_template=getattr(self, '_name_template', None),
@@ -379,7 +381,8 @@ class SyncEventHandler(FileSystemEventHandler):
 					range_naming=getattr(self, '_range_naming', True),
 					range_date_format=getattr(self, '_range_date_format', "%Y%m%d"),
 					fill_previous=getattr(self, '_fill_previous', True)
-				)
+				))
+				logger.info("auto organize completed: %s", stats)
 				# 只更新该目录的冷却时间
 				self._last_auto_ts[base] = now
 				triggered = True

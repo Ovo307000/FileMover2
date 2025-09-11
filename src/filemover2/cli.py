@@ -15,7 +15,7 @@ from rich.console import Console
 
 from .config import AppConfig, load_config, ConfigError
 from .syncer import start_watching, SourceSpec, start_watching_async
-from .organizer import organize_by_mtime_multi, organize_by_mtime_multi_async
+from .organizer import organize_by_mtime_multi_async
 from .logging_setup import setup_logging, get_log_file
 from .wizard import run_wizard
 from .guard import validate_config, backup_config, restore_config
@@ -177,12 +177,37 @@ def _cmd_organize(app_cfg: AppConfig, dirs: Optional[List[str]], chunk_size_over
 	dedup = org.dedup_strategy if org else "rename"
 	name_template = org.name_template if org else None
 	ts_fmt = org.timestamp_format if org else "%Y%m%d_%H%M%S"
-	if org and org.use_async:
-		asyncio.run(organize_by_mtime_multi_async(target_dirs=target_dirs, chunk_size=chunk_size, prefix=prefix, dry_run=dry, keep_source=keep_src, dedup_strategy=dedup, name_template=name_template, timestamp_format=ts_fmt))
-	else:
-		created = organize_by_mtime_multi(target_dirs=target_dirs, chunk_size=chunk_size, prefix=prefix, dry_run=dry, keep_source=keep_src, dedup_strategy=dedup, name_template=name_template, timestamp_format=ts_fmt)
-		for d in created:
-			print(f"Created: {d}")
+	concurrency = 8  # 默认并发数
+	
+	# 统一使用异步版本
+	stats = asyncio.run(organize_by_mtime_multi_async(
+		target_dirs=target_dirs, 
+		chunk_size=chunk_size, 
+		prefix=prefix, 
+		dry_run=dry, 
+		concurrency=concurrency,
+		keep_source=keep_src, 
+		dedup_strategy=dedup, 
+		name_template=name_template, 
+		timestamp_format=ts_fmt,
+		range_naming=org.range_naming if org else True,
+		range_date_format=org.range_date_format if org else "%Y%m%d",
+		fill_previous=org.fill_previous if org else True
+	))
+	
+	# 显示统计信息
+	console.print(Panel.fit(
+		f"整理完成！\n"
+		f"处理文件: {stats.processed}\n"
+		f"移动文件: {stats.moved}\n"
+		f"复制文件: {stats.copied}\n"
+		f"跳过文件: {stats.skipped}\n"
+		f"错误文件: {stats.errors}\n"
+		f"创建批次: {stats.batches_created}\n"
+		f"填充文件: {stats.files_filled}",
+		title="整理统计",
+		border_style="green" if stats.errors == 0 else "yellow"
+	))
 
 
 def _ensure_targets(cfg: AppConfig) -> None:

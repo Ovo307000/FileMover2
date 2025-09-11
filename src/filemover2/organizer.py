@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Sequence, Optional, Tuple
@@ -77,16 +78,50 @@ def _range_name(base: Path, oldest: datetime, newest: datetime, index: int, fmt:
 	return base / f"{oldest.strftime(fmt)}-{newest.strftime(fmt)}-part{index:02d}"
 
 
-def organize_by_mtime_multi(target_dirs: Sequence[Path], chunk_size: int, prefix: Optional[str], dry_run: bool = False, keep_source: bool = False, dedup_strategy: str = "rename", name_template: Optional[str] = None, timestamp_format: str = "%Y%m%d_%H%M%S", range_naming: bool = True, range_date_format: str = "%Y%m%d", fill_previous: bool = True) -> List[Path]:
+# 同步版本已移除，统一使用异步版本
+
+
+@dataclass
+class OrganizeStats:
+	"""整理统计信息"""
+	processed: int = 0
+	moved: int = 0
+	copied: int = 0
+	skipped: int = 0
+	batches_created: int = 0
+	files_filled: int = 0  # 填充到已有分区的文件数
+	errors: int = 0
+
+
+@dataclass
+class FileTask:
+	"""文件处理任务"""
+	src: Path
+	dst: Path
+	operation: str  # "move" or "copy"
+	dedup_strategy: str
+	keep_source: bool
+
+
+async def organize_by_mtime_multi_async(target_dirs: Sequence[Path], chunk_size: int, prefix: Optional[str], dry_run: bool = False, concurrency: int = 8, keep_source: bool = False, dedup_strategy: str = "rename", name_template: Optional[str] = None, timestamp_format: str = "%Y%m%d_%H%M%S", range_naming: bool = True, range_date_format: str = "%Y%m%d", fill_previous: bool = True) -> OrganizeStats:
+	"""异步整理文件，使用任务队列优化性能"""
 	# 强制使用日期范围命名，禁用自定义模板以避免冲突
 	range_naming = True
 	name_template = None
+	
+	logger.info("开始整理: %d 个目录, chunk_size=%d, concurrency=%d", len(target_dirs), chunk_size, concurrency)
+	
+	# 扫描所有文件
 	files: List[Path] = []
 	for root in target_dirs:
 		if not root.exists():
-			logger.warning("skip missing dir: %s", root)
+			logger.warning("跳过不存在的目录: %s", root)
 			continue
-		files.extend(list(_iter_files(root)))
+		root_files = list(_iter_files(root))
+		files.extend(root_files)
+		logger.debug("扫描目录 %s: 找到 %d 个文件", root, len(root_files))
+	
+	# 验证文件并排序
 	valid_files = []
 	for f in files:
 		try:
@@ -95,217 +130,190 @@ def organize_by_mtime_multi(target_dirs: Sequence[Path], chunk_size: int, prefix
 		except (FileNotFoundError, OSError):
 			logger.warning("文件在扫描过程中被删除或无法访问: %s", f)
 			continue
+	
 	if not valid_files:
-		logger.info("organize completed: 0 files (no inputs)")
-		return []
+		logger.info("整理完成: 0 个文件 (无输入)")
+		return OrganizeStats()
+	
 	valid_files.sort(key=_safe_get_mtime)
-	created_dirs: List[Path] = []
-	part = 1
-	total = moved = copied = skipped = 0
+	logger.info("扫描完成: 共 %d 个有效文件", len(valid_files))
+	
+	# 初始化统计和配置
+	stats = OrganizeStats()
 	base = target_dirs[0].parent if target_dirs else Path.cwd()
-	# 预扫描既有批次用于填充
 	existing = _scan_existing_batches(base, range_date_format) if range_naming and fill_previous else []
-	for i in range(0, len(valid_files), chunk_size):
-		chunk = valid_files[i:i+chunk_size]
-		oldest_dt = datetime.fromtimestamp(_safe_get_mtime(chunk[0]))
-		newest_dt = datetime.fromtimestamp(_safe_get_mtime(chunk[-1]))
-		chosen: Optional[Path] = None
-		chosen_capacity = 0
-		if range_naming and fill_previous:
-			candidates = [b for b in existing if (b[1] <= oldest_dt <= b[2]) or (b[1] <= newest_dt <= b[2])]
-			candidates.sort(key=lambda x: (x[2], x[3]))  # by newest then count
-			for idx in range(len(candidates)-1, -1, -1):
-				p_dir, o_dt, n_dt, cnt = candidates[idx]
-				cap = max(0, chunk_size - cnt)
-				if cap > 0:
-					chosen = p_dir
-					chosen_capacity = cap
-					break
-		# 先尝试将一部分塞入已存在的未满分区
-		start_idx = 0
-		if chosen is not None and chosen_capacity > 0:
-			take = min(len(chunk), chosen_capacity)
-			if not dry_run:
+	
+	if existing:
+		logger.info("发现 %d 个现有批次，启用填充算法", len(existing))
+		for batch_path, oldest, newest, count in existing:
+			logger.debug("现有批次: %s (%d 文件, 范围: %s-%s)", 
+				batch_path.name, count, oldest.strftime("%Y%m%d"), newest.strftime("%Y%m%d"))
+	
+	# 创建任务队列
+	task_queue: asyncio.Queue[Optional[FileTask]] = asyncio.Queue(maxsize=concurrency * 2)
+	stats_lock = asyncio.Lock()
+	
+	# 启动工作协程
+	workers = [asyncio.create_task(_file_worker(task_queue, stats, stats_lock, dry_run)) for _ in range(concurrency)]
+	
+	try:
+		# 处理文件分片
+		part = 1
+		i = 0
+		while i < len(valid_files):
+			# 获取当前分片
+			chunk_start = i
+			chunk_end = min(i + chunk_size, len(valid_files))
+			chunk = valid_files[chunk_start:chunk_end]
+			
+			oldest_dt = datetime.fromtimestamp(_safe_get_mtime(chunk[0]))
+			newest_dt = datetime.fromtimestamp(_safe_get_mtime(chunk[-1]))
+			
+			# 尝试填充到已有分区
+			chosen: Optional[Path] = None
+			chosen_capacity = 0
+			if range_naming and fill_previous:
+				candidates = [b for b in existing if (b[1] <= oldest_dt <= b[2]) or (b[1] <= newest_dt <= b[2])]
+				candidates.sort(key=lambda x: (x[2], x[3]))  # by newest then count
+				for idx in range(len(candidates)-1, -1, -1):
+					p_dir, o_dt, n_dt, cnt = candidates[idx]
+					cap = max(0, chunk_size - cnt)
+					if cap > 0:
+						chosen = p_dir
+						chosen_capacity = cap
+						break
+			
+			# 处理填充
+			if chosen is not None and chosen_capacity > 0:
+				take = min(len(chunk), chosen_capacity)
+				logger.info("填充批次 %s: %d 个文件", chosen.name, take)
+				
+				# 提交填充任务
 				for f in chunk[:take]:
-					if not f.exists():
-						logger.warning("文件在处理过程中被删除: %s", f)
-						continue
 					dst0 = chosen / f.name
 					dst = _apply_dedup(dst0, dedup_strategy)
 					if dst is None:
-						logger.info("skip existing (dedup=skip): %s", dst0)
-						skipped += 1
+						async with stats_lock:
+							stats.skipped += 1
 						continue
-					if keep_source:
-						shutil.copy2(f, dst)
-						copied += 1
-						logger.info("copy2: %s -> %s", f, dst)
-					else:
-						shutil.move(str(f), str(dst))
-						moved += 1
-						logger.info("move: %s -> %s", f, dst)
-					total += 1
-			# 更新 existing 列表中的计数（用于后续分片继续填充）
-			for j in range(len(existing)):
-				if existing[j][0] == chosen:
-					p_dir, o_dt, n_dt, cnt = existing[j]
-					existing[j] = (p_dir, o_dt, n_dt, cnt + take)
-					break
-			start_idx = take
-		# 剩余文件创建新分区
-		remaining = chunk[start_idx:]
-		if remaining:
-			old2 = datetime.fromtimestamp(_safe_get_mtime(remaining[0]))
-			new2 = datetime.fromtimestamp(_safe_get_mtime(remaining[-1]))
-			# 始终使用日期范围命名
-			batch_dir = _range_name(base, old2, new2, part, range_date_format)
-			created_dirs.append(batch_dir)
-			if not dry_run:
-				batch_dir.mkdir(parents=True, exist_ok=True)
-				for f in remaining:
-					if not f.exists():
-						logger.warning("文件在处理过程中被删除: %s", f)
-						continue
+					
+					task = FileTask(
+						src=f,
+						dst=dst,
+						operation="copy" if keep_source else "move",
+						dedup_strategy=dedup_strategy,
+						keep_source=keep_source
+					)
+					await task_queue.put(task)
+				
+				# 更新现有批次计数
+				for j in range(len(existing)):
+					if existing[j][0] == chosen:
+						p_dir, o_dt, n_dt, cnt = existing[j]
+						existing[j] = (p_dir, o_dt, n_dt, cnt + take)
+						break
+				
+				async with stats_lock:
+					stats.files_filled += take
+				
+				i += take
+				remaining = chunk[take:]
+			else:
+				remaining = chunk
+				i += len(chunk)
+			
+			# 处理剩余文件，创建新分区
+			if remaining:
+				actual_batch_size = min(len(remaining), chunk_size)
+				batch_files = remaining[:actual_batch_size]
+				
+				old2 = datetime.fromtimestamp(_safe_get_mtime(batch_files[0]))
+				new2 = datetime.fromtimestamp(_safe_get_mtime(batch_files[-1]))
+				batch_dir = _range_name(base, old2, new2, part, range_date_format)
+				
+				logger.info("创建新批次 %s: %d 个文件 (范围: %s-%s)", 
+					batch_dir.name, len(batch_files), old2.strftime("%Y%m%d"), new2.strftime("%Y%m%d"))
+				
+				if not dry_run:
+					batch_dir.mkdir(parents=True, exist_ok=True)
+				
+				# 提交新批次任务
+				for f in batch_files:
 					dst0 = batch_dir / f.name
 					dst = _apply_dedup(dst0, dedup_strategy)
 					if dst is None:
-						logger.info("skip existing (dedup=skip): %s", dst0)
-						skipped += 1
+						async with stats_lock:
+							stats.skipped += 1
 						continue
-					if keep_source:
-						shutil.copy2(f, dst)
-						copied += 1
-						logger.info("copy2: %s -> %s", f, dst)
-					else:
-						shutil.move(str(f), str(dst))
-						moved += 1
-						logger.info("move: %s -> %s", f, dst)
-					total += 1
-			logger.info("created batch: %s (%d files)", batch_dir, len(remaining))
-			part += 1
-	logger.info("organize completed: processed=%d moved=%d copied=%d skipped=%d batches=%d", total, moved, copied, skipped, len(created_dirs))
-	return created_dirs
+					
+					task = FileTask(
+						src=f,
+						dst=dst,
+						operation="copy" if keep_source else "move",
+						dedup_strategy=dedup_strategy,
+						keep_source=keep_source
+					)
+					await task_queue.put(task)
+				
+				async with stats_lock:
+					stats.batches_created += 1
+				
+				part += 1
+				
+				# 处理溢出文件
+				if len(remaining) > chunk_size:
+					valid_files = remaining[chunk_size:] + valid_files[i:]
+					i = 0
+		
+		# 等待所有任务完成
+		await task_queue.join()
+		
+	finally:
+		# 停止工作协程
+		for _ in workers:
+			await task_queue.put(None)
+		await asyncio.gather(*workers, return_exceptions=True)
+	
+	logger.info("整理完成: 处理=%d 移动=%d 复制=%d 跳过=%d 错误=%d 批次=%d 填充=%d", 
+		stats.processed, stats.moved, stats.copied, stats.skipped, stats.errors, 
+		stats.batches_created, stats.files_filled)
+	
+	return stats
 
 
-async def organize_by_mtime_multi_async(target_dirs: Sequence[Path], chunk_size: int, prefix: Optional[str], dry_run: bool = False, concurrency: int = 8, keep_source: bool = False, dedup_strategy: str = "rename", name_template: Optional[str] = None, timestamp_format: str = "%Y%m%d_%H%M%S", range_naming: bool = True, range_date_format: str = "%Y%m%d", fill_previous: bool = True) -> List[Path]:
-	# 强制使用日期范围命名，禁用自定义模板以避免冲突
-	range_naming = True
-	name_template = None
-	files: List[Path] = []
-	for root in target_dirs:
-		if not root.exists():
-			logger.warning("skip missing dir: %s", root)
-			continue
-		files.extend(list(_iter_files(root)))
-	valid_files = []
-	for f in files:
+async def _file_worker(queue: asyncio.Queue[Optional[FileTask]], stats: OrganizeStats, stats_lock: asyncio.Lock, dry_run: bool) -> None:
+	"""文件处理工作协程"""
+	while True:
+		task = await queue.get()
+		if task is None:
+			queue.task_done()
+			break
+		
 		try:
-			_ = f.stat().st_mtime
-			valid_files.append(f)
-		except (FileNotFoundError, OSError):
-			logger.warning("文件在扫描过程中被删除或无法访问: %s", f)
-			continue
-	if not valid_files:
-		logger.info("organize completed: 0 files (no inputs)")
-		return []
-	valid_files.sort(key=_safe_get_mtime)
-	created_dirs: List[Path] = []
-	part = 1
-	base = target_dirs[0].parent if target_dirs else Path.cwd()
-	sem = asyncio.Semaphore(max(1, concurrency))
-	total = moved = copied = skipped = 0
-	existing = _scan_existing_batches(base, range_date_format) if range_naming and fill_previous else []
-	for i in range(0, len(valid_files), chunk_size):
-		chunk = valid_files[i:i+chunk_size]
-		oldest_dt = datetime.fromtimestamp(_safe_get_mtime(chunk[0]))
-		newest_dt = datetime.fromtimestamp(_safe_get_mtime(chunk[-1]))
-		chosen: Optional[Path] = None
-		chosen_capacity = 0
-		if range_naming and fill_previous:
-			candidates = [b for b in existing if (b[1] <= oldest_dt <= b[2]) or (b[1] <= newest_dt <= b[2])]
-			candidates.sort(key=lambda x: (x[2], x[3]))  # by newest then count
-			for idx in range(len(candidates)-1, -1, -1):
-				p_dir, o_dt, n_dt, cnt = candidates[idx]
-				cap = max(0, chunk_size - cnt)
-				if cap > 0:
-					chosen = p_dir
-					chosen_capacity = cap
-					break
-		# 先尝试将一部分塞入已存在的未满分区
-		start_idx = 0
-		if chosen is not None and chosen_capacity > 0:
-			take = min(len(chunk), chosen_capacity)
+			if not task.src.exists():
+				logger.warning("文件在处理过程中被删除: %s", task.src)
+				async with stats_lock:
+					stats.errors += 1
+				continue
+			
 			if not dry_run:
-				async def move_or_copy_fill(src: Path) -> None:
-					async with sem:
-						if not src.exists():
-							logger.warning("文件在处理过程中被删除: %s", src)
-							return
-						dst0 = chosen / src.name
-						dst = _apply_dedup(dst0, dedup_strategy)
-						if dst is None:
-							logger.info("skip existing (dedup=skip): %s", dst0)
-							nonlocal skipped
-							skipped += 1
-							return
-						if keep_source:
-							await asyncio.to_thread(shutil.copy2, src, dst)
-							nonlocal copied
-							copied += 1
-							logger.info("copy2: %s -> %s", src, dst)
-						else:
-							await asyncio.to_thread(shutil.move, str(src), str(dst))
-							nonlocal moved
-							moved += 1
-							logger.info("move: %s -> %s", src, dst)
-						nonlocal total
-						total += 1
-				tasks = [asyncio.create_task(move_or_copy_fill(f)) for f in chunk[:take]]
-				await asyncio.gather(*tasks)
-			# 更新 existing 列表中的计数（用于后续分片继续填充）
-			for j in range(len(existing)):
-				if existing[j][0] == chosen:
-					p_dir, o_dt, n_dt, cnt = existing[j]
-					existing[j] = (p_dir, o_dt, n_dt, cnt + take)
-					break
-			start_idx = take
-		# 剩余文件创建新分区
-		remaining = chunk[start_idx:]
-		if remaining:
-			old2 = datetime.fromtimestamp(_safe_get_mtime(remaining[0]))
-			new2 = datetime.fromtimestamp(_safe_get_mtime(remaining[-1]))
-			# 始终使用日期范围命名
-			batch_dir = _range_name(base, old2, new2, part, range_date_format)
-			created_dirs.append(batch_dir)
-			if not dry_run:
-				batch_dir.mkdir(parents=True, exist_ok=True)
-				async def move_or_copy_new(src: Path) -> None:
-					async with sem:
-						if not src.exists():
-							logger.warning("文件在处理过程中被删除: %s", src)
-							return
-						dst0 = batch_dir / src.name
-						dst = _apply_dedup(dst0, dedup_strategy)
-						if dst is None:
-							logger.info("skip existing (dedup=skip): %s", dst0)
-							nonlocal skipped
-							skipped += 1
-							return
-						if keep_source:
-							await asyncio.to_thread(shutil.copy2, src, dst)
-							nonlocal copied
-							copied += 1
-							logger.info("copy2: %s -> %s", src, dst)
-						else:
-							await asyncio.to_thread(shutil.move, str(src), str(dst))
-							nonlocal moved
-							moved += 1
-							logger.info("move: %s -> %s", src, dst)
-						nonlocal total
-						total += 1
-				tasks = [asyncio.create_task(move_or_copy_new(f)) for f in remaining]
-				await asyncio.gather(*tasks)
-			logger.info("created batch: %s (%d files)", batch_dir, len(remaining))
-			part += 1
-	logger.info("organize completed: processed=%d moved=%d copied=%d skipped=%d batches=%d", total, moved, copied, skipped, len(created_dirs))
-	return created_dirs
+				if task.operation == "copy":
+					await asyncio.to_thread(shutil.copy2, task.src, task.dst)
+					async with stats_lock:
+						stats.copied += 1
+				else:
+					await asyncio.to_thread(shutil.move, str(task.src), str(task.dst))
+					async with stats_lock:
+						stats.moved += 1
+			else:
+				logger.debug("DRY RUN: %s %s -> %s", task.operation, task.src, task.dst)
+			
+			async with stats_lock:
+				stats.processed += 1
+			
+		except Exception as e:
+			logger.error("处理文件失败 %s -> %s: %s", task.src, task.dst, e)
+			async with stats_lock:
+				stats.errors += 1
+		finally:
+			queue.task_done()
