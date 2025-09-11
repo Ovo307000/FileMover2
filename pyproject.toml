@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "filemover2"
+version = "0.1.0"
+description = "Watch folders and sync changes; organize files into time-stamped chunks"
+authors = [{ name = "Your Name" }]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "watchdog==4.0.1",
+  "PyYAML==6.0.2",
+  "colorama==0.4.6",
+  "rich==13.7.1",
+]
+
+[project.scripts]
+filemover2 = "filemover2.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-q"
+testpaths = [
+  "tests",
+]

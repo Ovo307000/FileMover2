@@ -1,0 +1,2 @@
+[console_scripts]
+filemover2 = filemover2.cli:main

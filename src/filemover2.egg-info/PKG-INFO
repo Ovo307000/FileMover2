@@ -1,0 +1,141 @@
+Metadata-Version: 2.4
+Name: filemover2
+Version: 0.1.0
+Summary: Watch folders and sync changes; organize files into time-stamped chunks
+Author: Your Name
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: watchdog==4.0.1
+Requires-Dist: PyYAML==6.0.2
+Requires-Dist: colorama==0.4.6
+Requires-Dist: rich==13.7.1
+
+# FileMover2
+
+监听多个目录变动并同步到目标目录；按修改时间对文件进行分片整理到带时间戳的文件夹。
+
+## 安装
+
+```powershell
+python -m venv .venv
+. .venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install -e .
+```
+
+## 快速开始
+
+- 用向导创建配置（推荐）：
+```powershell
+filemover2 config-wizard --out filemover.yaml
+```
+
+- 启动监听：
+```powershell
+# 直接用脚本
+./scripts/start-watch.ps1 -ConfigPath filemover.yaml
+
+# 或 CLI
+filemover2 watch -c filemover.yaml
+```
+
+## 性能设计（异步与队列）
+- 监听线程只做事件解析与入队，不做重IO。
+- 背景工作池（默认 4 个线程）从队列中取出任务执行：mkdir/copy/move/unlink/rmtree。
+- 队列最大 4096，避免极端情况下 OOM；队列满会丢弃并报警。
+- 好处：减少主线程阻塞，提高突发事件吞吐量；目录深、目标多时收益明显。
+- 调优：如需更高并发，可在内部 `start_watching(..., num_workers=8)` 提升工作线程数。
+
+## 可靠性（重试与完整性校验）
+- 所有 copy/move 操作内置重试与指数退避：默认最多重试 3 次，初始 200ms，失败加倍至最多 5s。
+- 完整性校验：copy/move 后对比源/目标文件大小（best-effort）。大小不一致将触发重试或记录失败日志。
+- 注意：move 后源文件可能已不存在，校验为尽力而为；如需更强校验可扩展为哈希（MD5/SHA-256）。
+
+## 配置保护与复原
+- 校验配置：
+```powershell
+filemover2 config-validate -c filemover.yaml
+```
+- 备份配置（时间戳 .bak）：
+```powershell
+filemover2 config-backup -c filemover.yaml
+```
+- 从备份恢复：
+```powershell
+filemover2 config-restore --backup filemover.yaml.20250101_120000.bak --dest filemover.yaml
+```
+- 向导保存前自动备份：`config-wizard` 在目标文件已存在时会自动生成时间戳备份。
+
+## PowerShell 启动脚本的逻辑与原理
+脚本路径：`scripts/start-watch.ps1`
+- 读取参数 `-ConfigPath`，默认 `filemover.yaml`。
+- 如果当前目录存在 `.venv\Scripts\Activate.ps1`，则先激活该虚拟环境，确保依赖与入口可用。
+- 使用 `Get-Command filemover2` 检测命令是否存在，若未安装则提示先执行 `pip install -e .`。
+- 调用 `filemover2 watch -c <配置>` 启动监听。整个过程简单清晰，便于你学习如何在 PowerShell 中：
+  - 激活虚拟环境
+  - 检查命令是否可用
+  - 传递参数并执行 CLI
+
+## 配置示例（含新选项）
+
+```yaml
+watch:
+  mappings:
+    - source: "D:/SourceA"
+      targets: ["E:/BackupA", "F:/MirrorA"]
+  include_patterns: ["*"]
+  exclude_patterns: ["*.tmp", "~*"]
+  ignore_dotfiles: true
+  debounce_ms: 200
+  auto_organize:
+    enabled: true
+    threshold: 1000
+    cooldown_s: 60
+    prefix: "batch"
+  worker_threads: 4          # 工作线程数（默认4）
+  io_retries: 3              # IO 重试次数（默认3）
+  io_backoff_ms: 200         # 初始退避毫秒（默认200，指数增长，至多5s）
+  verify_mode: size          # 完整性校验模式：size 或 none
+
+organize:
+  target_dir: "E:/BackupA"
+  chunk_size: 1000
+  prefix: "batch"
+  dry_run: false
+```
+
+## 字段说明
+- watch.mappings[].source：监听的源目录。
+- watch.mappings[].targets[]：该源要镜像到的目标目录数组。
+- watch.include_patterns / watch.exclude_patterns：支持 `*`、`?`、`[abc]` 等通配。
+- watch.ignore_dotfiles：是否忽略以 `.` 开头的文件。
+- watch.debounce_ms：事件处理节流，避免短时间内重复事件导致频繁IO。
+- watch.auto_organize：自动整理设置；以第一个映射的第一个 target 为统计基准。
+- organize.target_dir：手动整理的目标目录。
+- organize.chunk_size：每批文件数量（如1000）。
+- organize.prefix：批次目录的可选前缀；目录名形如 `YYYYMMDD_HHMMSS[_prefix]_partNN`。
+- organize.dry_run：只显示将创建的目录，不执行移动。
+
+## 字段说明（新增）
+- watch.worker_threads：工作池线程数量，提升并发度。
+- watch.io_retries：copy/move 失败的最大重试次数。
+- watch.io_backoff_ms：首次重试前等待毫秒数，之后指数退避至上限 5s。
+- watch.verify_mode：完整性校验模式，`size` 比对文件大小，`none` 关闭校验。
+
+## 界面与体验
+- `config-wizard` 基于 rich 展示面板、表格与确认提示，交互式输入后即时预览并保存 YAML；保存前自动备份旧文件。
+- 运行时日志包含创建、复制、移动、删除与自动整理的触发信息，可用 `-v` 查看更详细输出（organize）。
+
+## 使用异步 async/await
+- 监听：
+```powershell
+filemover2 watch -c filemover.yaml --async
+```
+- 分片整理：
+```powershell
+filemover2 organize -c filemover.yaml --dir "D:\\Downloads" --chunk-size 1000 --async
+```
+- 设计要点：
+  - 事件依然由 watchdog 发出；事件线程将任务入队到 asyncio.Queue。
+  - 协程工作者使用 `asyncio.to_thread` 执行阻塞 IO（copy/move），既保留线程并发，又统一为 async 接口。
+  - 与线程池版逻辑等价，配置项（重试、退避、校验、线程数）仍生效；`--async` 模式下由协程调度控制并发。
