@@ -10,16 +10,37 @@ from typing import Iterable, List, Optional, Sequence, Literal
 import threading
 import queue
 import asyncio
+import json
+from datetime import datetime
 
 from watchdog.events import FileSystemEventHandler, FileSystemEvent, FileCreatedEvent, FileModifiedEvent, FileMovedEvent, FileDeletedEvent, DirCreatedEvent, DirMovedEvent, DirDeletedEvent
 from watchdog.observers import Observer
 
 from .organizer import organize_by_mtime_multi
+from .logging_setup import get_log_file
 
 logger = logging.getLogger(__name__)
 
+FAIL_LOG = get_log_file().with_name("failures.jsonl")
+
 
 Operation = Literal["mkdir", "copy", "move", "unlink", "rmtree"]
+
+
+def _record_failure(item: "WorkItem", err: Exception) -> None:
+	try:
+		FAIL_LOG.parent.mkdir(parents=True, exist_ok=True)
+		with FAIL_LOG.open("a", encoding="utf-8") as f:
+			f.write(json.dumps({
+				"ts": datetime.now().isoformat(),
+				"op": item.op,
+				"src": str(item.src) if item.src else None,
+				"dst": str(item.dst) if item.dst else None,
+				"error": str(err),
+				"retries": item.retries,
+			}) + "\n")
+	except Exception as e:  # pragma: no cover
+		logger.error("write failure log failed: %s", e)
 
 
 @dataclass
@@ -97,6 +118,7 @@ class WorkerPool:
 			except Exception as e:
 				attempt += 1
 				if attempt > max(0, item.retries):
+					_record_failure(item, e)
 					raise
 				logger.warning("op %s failed (attempt %d/%d): %s", item.op, attempt, item.retries, e)
 				time.sleep(backoff / 1000)
@@ -253,6 +275,7 @@ class AsyncWorkerPool:
 			except Exception as e:
 				attempt += 1
 				if attempt > max(0, item.retries):
+					_record_failure(item, e)
 					raise
 				logger.warning("op %s failed (attempt %d/%d): %s", item.op, attempt, item.retries, e)
 				await asyncio.sleep(backoff / 1000)
@@ -260,7 +283,7 @@ class AsyncWorkerPool:
 
 
 class SyncEventHandler(FileSystemEventHandler):
-	def __init__(self, sources: List[SourceSpec], include_patterns: List[str], exclude_patterns: List[str], ignore_dotfiles: bool, auto_threshold: Optional[int] = None, auto_prefix: Optional[str] = None, auto_cooldown_s: int = 60, num_workers: int = 4, keep_source: bool = False):
+	def __init__(self, sources: List[SourceSpec], include_patterns: List[str], exclude_patterns: List[str], ignore_dotfiles: bool, auto_threshold: Optional[int] = None, auto_prefix: Optional[str] = None, auto_cooldown_s: int = 60, num_workers: int = 4, keep_source: bool = False, dedup_strategy: str = "rename", name_template: Optional[str] = None, timestamp_format: str = "%Y%m%d_%H%M%S", range_naming: bool = True, range_date_format: str = "%Y%m%d", fill_previous: bool = True):
 		self.sources = sources
 		self.include_patterns = include_patterns
 		self.exclude_patterns = exclude_patterns
@@ -274,6 +297,12 @@ class SyncEventHandler(FileSystemEventHandler):
 		self._async_pool: Optional[AsyncWorkerPool] = None
 		self._loop: Optional[asyncio.AbstractEventLoop] = None
 		self._keep_source = keep_source
+		self._dedup_strategy = dedup_strategy
+		self._name_template = name_template
+		self._timestamp_format = timestamp_format
+		self._range_naming = range_naming
+		self._range_date_format = range_date_format
+		self._fill_previous = fill_previous
 
 	def attach_async_pool(self, pool: AsyncWorkerPool, loop: asyncio.AbstractEventLoop) -> None:
 		self._async_pool = pool
@@ -326,7 +355,20 @@ class SyncEventHandler(FileSystemEventHandler):
 				continue
 			if count >= self.auto_threshold:
 				logger.info("auto organize triggered: %d >= %d (base=%s)", count, self.auto_threshold, base)
-				organize_by_mtime_multi([base], chunk_size=self.auto_threshold, prefix=self.auto_prefix, dry_run=False)
+				# 使用与配置一致的参数进行自动整理
+				organize_by_mtime_multi(
+					[base], 
+					chunk_size=self.auto_threshold, 
+					prefix=self.auto_prefix, 
+					dry_run=False,
+					keep_source=self._keep_source,
+					dedup_strategy=getattr(self, '_dedup_strategy', 'rename'),
+					name_template=getattr(self, '_name_template', None),
+					timestamp_format=getattr(self, '_timestamp_format', "%Y%m%d_%H%M%S"),
+					range_naming=getattr(self, '_range_naming', True),
+					range_date_format=getattr(self, '_range_date_format', "%Y%m%d"),
+					fill_previous=getattr(self, '_fill_previous', True)
+				)
 				triggered = True
 		if triggered:
 			self._last_auto_ts = now
@@ -406,9 +448,9 @@ class SyncEventHandler(FileSystemEventHandler):
 		self._maybe_auto_organize()
 
 
-def start_watching(sources: List[SourceSpec], include_patterns: List[str], exclude_patterns: List[str], ignore_dotfiles: bool, debounce_ms: int, auto_threshold: Optional[int] = None, auto_prefix: Optional[str] = None, auto_cooldown_s: int = 60, num_workers: int = 4, io_retries: int = 3, io_backoff_ms: int = 200, verify_mode: str = "size", keep_source: bool = False, dedup_strategy: str = "rename") -> None:
+def start_watching(sources: List[SourceSpec], include_patterns: List[str], exclude_patterns: List[str], ignore_dotfiles: bool, debounce_ms: int, auto_threshold: Optional[int] = None, auto_prefix: Optional[str] = None, auto_cooldown_s: int = 60, num_workers: int = 4, io_retries: int = 3, io_backoff_ms: int = 200, verify_mode: str = "size", keep_source: bool = False, dedup_strategy: str = "rename", name_template: Optional[str] = None, timestamp_format: str = "%Y%m%d_%H%M%S", range_naming: bool = True, range_date_format: str = "%Y%m%d", fill_previous: bool = True) -> None:
 	observer = Observer()
-	handler = SyncEventHandler(sources, include_patterns, exclude_patterns, ignore_dotfiles, auto_threshold=auto_threshold, auto_prefix=auto_prefix, auto_cooldown_s=auto_cooldown_s, num_workers=num_workers, keep_source=keep_source)
+	handler = SyncEventHandler(sources, include_patterns, exclude_patterns, ignore_dotfiles, auto_threshold=auto_threshold, auto_prefix=auto_prefix, auto_cooldown_s=auto_cooldown_s, num_workers=num_workers, keep_source=keep_source, dedup_strategy=dedup_strategy, name_template=name_template, timestamp_format=timestamp_format, range_naming=range_naming, range_date_format=range_date_format, fill_previous=fill_previous)
 	def submit_with_defaults(item: WorkItem) -> None:
 		item.retries = io_retries
 		item.backoff_ms = io_backoff_ms
@@ -431,9 +473,9 @@ def start_watching(sources: List[SourceSpec], include_patterns: List[str], exclu
 		logger.info("observer stopped")
 
 
-async def start_watching_async(sources: List[SourceSpec], include_patterns: List[str], exclude_patterns: List[str], ignore_dotfiles: bool, debounce_ms: int, auto_threshold: Optional[int] = None, auto_prefix: Optional[str] = None, auto_cooldown_s: int = 60, num_workers: int = 4, io_retries: int = 3, io_backoff_ms: int = 200, verify_mode: str = "size", keep_source: bool = False, dedup_strategy: str = "rename") -> None:
+async def start_watching_async(sources: List[SourceSpec], include_patterns: List[str], exclude_patterns: List[str], ignore_dotfiles: bool, debounce_ms: int, auto_threshold: Optional[int] = None, auto_prefix: Optional[str] = None, auto_cooldown_s: int = 60, num_workers: int = 4, io_retries: int = 3, io_backoff_ms: int = 200, verify_mode: str = "size", keep_source: bool = False, dedup_strategy: str = "rename", name_template: Optional[str] = None, timestamp_format: str = "%Y%m%d_%H%M%S", range_naming: bool = True, range_date_format: str = "%Y%m%d", fill_previous: bool = True) -> None:
 	observer = Observer()
-	handler = SyncEventHandler(sources, include_patterns, exclude_patterns, ignore_dotfiles, auto_threshold=auto_threshold, auto_prefix=auto_prefix, auto_cooldown_s=auto_cooldown_s, num_workers=1, keep_source=keep_source)
+	handler = SyncEventHandler(sources, include_patterns, exclude_patterns, ignore_dotfiles, auto_threshold=auto_threshold, auto_prefix=auto_prefix, auto_cooldown_s=auto_cooldown_s, num_workers=1, keep_source=keep_source, dedup_strategy=dedup_strategy, name_template=name_template, timestamp_format=timestamp_format, range_naming=range_naming, range_date_format=range_date_format, fill_previous=fill_previous)
 	async_pool = AsyncWorkerPool(num_workers=num_workers, io_retries=io_retries, io_backoff_ms=io_backoff_ms, verify=(verify_mode == "size"))
 	handler.attach_async_pool(async_pool, asyncio.get_running_loop())
 	# wrap async submit to inject defaults

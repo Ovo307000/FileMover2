@@ -47,12 +47,15 @@ class WatchConfig:
 
 @dataclass
 class OrganizeConfig:
-	# 仅保留多目录字段
 	target_dirs: List[Path]
 	chunk_size: int = 1000
 	prefix: Optional[str] = None
 	name_template: Optional[str] = None
 	timestamp_format: str = "%Y%m%d_%H%M%S"
+	# 新增：区间命名与填充旧分区
+	range_naming: bool = True               # 使用 最旧-最新-分片 命名
+	range_date_format: str = "%Y%m%d"      # 区间命名的日期格式
+	fill_previous: bool = True              # 若存在同区间且未满，优先填充
 	dry_run: bool = False
 	keep_source: bool = False
 	dedup_strategy: str = "rename"  # one of: skip, rename, overwrite
@@ -148,7 +151,6 @@ def _parse_watch(cfg: dict) -> Optional[WatchConfig]:
 def _parse_organize(cfg: dict) -> Optional[OrganizeConfig]:
 	if not cfg:
 		return None
-	# 仅接受 target_dirs 数组
 	target_dirs_raw = cfg.get("target_dirs")
 	if not isinstance(target_dirs_raw, list) or not target_dirs_raw:
 		raise ConfigError("organize.target_dirs 必须是非空数组")
@@ -157,6 +159,9 @@ def _parse_organize(cfg: dict) -> Optional[OrganizeConfig]:
 	prefix = cfg.get("prefix")
 	name_template = cfg.get("name_template")
 	timestamp_format = str(cfg.get("timestamp_format", "%Y%m%d_%H%M%S"))
+	range_naming = bool(cfg.get("range_naming", True))
+	range_date_format = str(cfg.get("range_date_format", "%Y%m%d"))
+	fill_previous = bool(cfg.get("fill_previous", True))
 	dry_run = bool(cfg.get("dry_run", False))
 	keep_source = bool(cfg.get("keep_source", False))
 	dedup_strategy = str(cfg.get("dedup_strategy", "rename")).lower()
@@ -169,6 +174,9 @@ def _parse_organize(cfg: dict) -> Optional[OrganizeConfig]:
 		prefix=prefix,
 		name_template=name_template,
 		timestamp_format=timestamp_format,
+		range_naming=range_naming,
+		range_date_format=range_date_format,
+		fill_previous=fill_previous,
 		dry_run=dry_run,
 		keep_source=keep_source,
 		dedup_strategy=dedup_strategy,

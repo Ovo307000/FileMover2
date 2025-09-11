@@ -46,10 +46,7 @@ organize:
   chunk_size: 1000                    # 每批文件数（如1000）
   prefix: "batch"                    # 批次目录前缀（可选）
 
-  # 新：批次目录命名模板与时间格式（可选）
-  # 可用占位符：{timestamp} {prefix} {index}
-  name_template: "{timestamp}_{prefix}_part{index:02d}"
-  timestamp_format: "%Y%m%d_%H%M%S"
+  # 命名模板已移除：统一采用 “最旧日期-最新日期-partNN” 命名，避免冲突
   dry_run: false                      # 仅演示不移动文件
   keep_source: false                  # 整理保留源：复制而非移动
   dedup_strategy: rename              # 去重策略：skip/rename/overwrite

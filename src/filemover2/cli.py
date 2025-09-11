@@ -16,7 +16,7 @@ from rich.console import Console
 from .config import AppConfig, load_config, ConfigError
 from .syncer import start_watching, SourceSpec, start_watching_async
 from .organizer import organize_by_mtime_multi, organize_by_mtime_multi_async
-from .logging_setup import setup_logging
+from .logging_setup import setup_logging, get_log_file
 from .wizard import run_wizard
 from .guard import validate_config, backup_config, restore_config
 
@@ -85,6 +85,13 @@ def _cmd_watch(app_cfg: AppConfig, auto_mode: Optional[bool] = None) -> None:
 	auto_threshold = w.auto_organize.threshold if use_auto and w.auto_organize else None
 	auto_prefix = w.auto_organize.prefix if use_auto and w.auto_organize else None
 	auto_cooldown_s = w.auto_organize.cooldown_s if use_auto and w.auto_organize else 60
+	# 组织命名相关配置（若缺少 organize 块则给出安全默认值）
+	org = app_cfg.organize
+	name_template = (org.name_template if org else None)
+	timestamp_format = (org.timestamp_format if org else "%Y%m%d_%H%M%S")
+	range_naming = (org.range_naming if org else True)
+	range_date_format = (org.range_date_format if org else "%Y%m%d")
+	fill_previous = (org.fill_previous if org else True)
 	if w.use_async:
 		asyncio.run(start_watching_async(
 			sources=sources,
@@ -101,6 +108,11 @@ def _cmd_watch(app_cfg: AppConfig, auto_mode: Optional[bool] = None) -> None:
 			verify_mode=w.verify_mode,
 			keep_source=w.keep_source,
 			dedup_strategy=w.dedup_strategy,
+			name_template=name_template,
+			timestamp_format=timestamp_format,
+			range_naming=range_naming,
+			range_date_format=range_date_format,
+			fill_previous=fill_previous,
 		))
 	else:
 		start_watching(
@@ -118,6 +130,11 @@ def _cmd_watch(app_cfg: AppConfig, auto_mode: Optional[bool] = None) -> None:
 			verify_mode=w.verify_mode,
 			keep_source=w.keep_source,
 			dedup_strategy=w.dedup_strategy,
+			name_template=name_template,
+			timestamp_format=timestamp_format,
+			range_naming=range_naming,
+			range_date_format=range_date_format,
+			fill_previous=fill_previous,
 		)
 
 
@@ -255,6 +272,50 @@ def _cmd_start_interactive(config_hint: Optional[str]) -> None:
 		_cmd_organize(cfg, target_dirs, None, None, False, False, False)
 
 
+def _read_failures(limit: Optional[int] = None) -> List[dict]:
+	fail_file = get_log_file().with_name("failures.jsonl")
+	if not fail_file.exists():
+		return []
+	rows: List[dict] = []
+	with fail_file.open("r", encoding="utf-8") as f:
+		for line in f:
+			line = line.strip()
+			if not line:
+				continue
+			try:
+				rows.append(json.loads(line))
+			except Exception:
+				continue
+	return rows[-limit:] if limit else rows
+
+
+def _cmd_retry_failures(app_cfg: AppConfig, limit: Optional[int]) -> None:
+	setup_logging(logging.INFO)
+	rows = _read_failures(limit)
+	if not rows:
+		print("no failures recorded")
+		return
+	if not app_cfg.watch:
+		raise ConfigError("需要 watch 配置以定位目标目录")
+	w = app_cfg.watch
+	sources = [SourceSpec(root=m.source, targets=m.targets) for m in w.mappings]
+	# 简单策略：根据原失败记录中的路径，尝试重建 WorkItem 并提交到同步 WorkerPool（非监听）
+	from .syncer import WorkerPool, WorkItem
+	pool = WorkerPool(num_workers=w.worker_threads)
+	pool.start()
+	try:
+		for r in rows:
+			op = r.get("op")
+			src = Path(r["src"]) if r.get("src") else None
+			dst = Path(r["dst"]) if r.get("dst") else None
+			item = WorkItem(op=op, src=src, dst=dst, retries=w.io_retries, backoff_ms=w.io_backoff_ms, verify=(w.verify_mode=="size"), dedup_strategy=w.dedup_strategy)
+			pool.submit(item)
+		logger.info("submitted %d failure(s) for retry", len(rows))
+	finally:
+		pool._q.join()  # type: ignore[attr-defined]
+		pool.stop()
+
+
 def build_parser() -> argparse.ArgumentParser:
 	parser = argparse.ArgumentParser(prog="filemover2", description="Watch folders and sync changes; organize files into time-stamped chunks")
 	parser.add_argument("--config", "-c", required=False, help="配置文件路径（YAML/JSON）")
@@ -288,6 +349,9 @@ def build_parser() -> argparse.ArgumentParser:
 	p_restore.add_argument("--backup", required=True, help="备份文件路径")
 	p_restore.add_argument("--dest", help="恢复到的配置路径，默认去除 .bak 后缀")
 
+	p_retry = sub.add_parser("retry-failures", help="读取失败记录并重试")
+	p_retry.add_argument("--limit", type=int, required=False, help="仅重试最后 N 条记录")
+
 	return parser
 
 
@@ -315,6 +379,9 @@ def main(argv: Optional[list[str]] = None) -> None:
 			return
 		if args.command == "start":
 			_cmd_start_interactive(args.config)
+			return
+		if args.command == "retry-failures":
+			_cmd_retry_failures(cfg, args.limit)  # type: ignore[arg-type]
 			return
 		resolved = _resolve_config_path(args.config)
 		if not resolved:
