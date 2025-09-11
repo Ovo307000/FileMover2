@@ -68,7 +68,7 @@ def _scan_existing_batches(base: Path, range_date_format: str) -> List[Tuple[Pat
 			newest = datetime.strptime(m.group(2), range_date_format)
 		except ValueError:
 			continue
-		count = sum(1 for f in p.iterdir() if f.is_file())
+		count = sum(1 for f in p.rglob("*") if f.is_file())
 		batches.append((p, oldest, newest, count))
 	return batches
 
@@ -219,49 +219,93 @@ async def organize_by_mtime_multi_async(target_dirs: Sequence[Path], chunk_size:
 		chunk = valid_files[i:i+chunk_size]
 		oldest_dt = datetime.fromtimestamp(_safe_get_mtime(chunk[0]))
 		newest_dt = datetime.fromtimestamp(_safe_get_mtime(chunk[-1]))
-		if range_naming:
-			if fill_previous:
-				candidates = [b for b in existing if b[1] <= oldest_dt <= b[2] or b[1] <= newest_dt <= b[2]]
-				candidates.sort(key=lambda x: x[2])
-				chosen: Optional[Path] = None
-				for p_dir, o_dt, n_dt, cnt in reversed(candidates):
-					if cnt < chunk_size:
-						chosen = p_dir
-						break
-				batch_dir = chosen if chosen is not None else _range_name(base, oldest_dt, newest_dt, part, range_date_format)
-			else:
-				batch_dir = _range_name(base, oldest_dt, newest_dt, part, range_date_format)
-		# 非范围命名分支被禁用（name_template 已强制为 None）
-		created_dirs.append(batch_dir)
-		if not dry_run:
-			batch_dir.mkdir(parents=True, exist_ok=True)
-			async def move_or_copy(src: Path) -> None:
-				async with sem:
-					if not src.exists():
-						logger.warning("文件在处理过程中被删除: %s", src)
-						return
-					dst0 = batch_dir / src.name
-					dst = _apply_dedup(dst0, dedup_strategy)
-					if dst is None:
-						logger.info("skip existing (dedup=skip): %s", dst0)
-						nonlocal skipped
-						skipped += 1
-						return
-					if keep_source:
-						await asyncio.to_thread(shutil.copy2, src, dst)
-						nonlocal copied
-						copied += 1
-						logger.info("copy2: %s -> %s", src, dst)
-					else:
-						await asyncio.to_thread(shutil.move, str(src), str(dst))
-						nonlocal moved
-						moved += 1
-						logger.info("move: %s -> %s", src, dst)
-					nonlocal total
-					total += 1
-			tasks = [asyncio.create_task(move_or_copy(f)) for f in chunk]
-			await asyncio.gather(*tasks)
-		logger.info("created batch: %s (%d files)", batch_dir, len(chunk))
-		part += 1
+		chosen: Optional[Path] = None
+		chosen_capacity = 0
+		if range_naming and fill_previous:
+			candidates = [b for b in existing if (b[1] <= oldest_dt <= b[2]) or (b[1] <= newest_dt <= b[2])]
+			candidates.sort(key=lambda x: (x[2], x[3]))  # by newest then count
+			for idx in range(len(candidates)-1, -1, -1):
+				p_dir, o_dt, n_dt, cnt = candidates[idx]
+				cap = max(0, chunk_size - cnt)
+				if cap > 0:
+					chosen = p_dir
+					chosen_capacity = cap
+					break
+		# 先尝试将一部分塞入已存在的未满分区
+		start_idx = 0
+		if chosen is not None and chosen_capacity > 0:
+			take = min(len(chunk), chosen_capacity)
+			if not dry_run:
+				async def move_or_copy_fill(src: Path) -> None:
+					async with sem:
+						if not src.exists():
+							logger.warning("文件在处理过程中被删除: %s", src)
+							return
+						dst0 = chosen / src.name
+						dst = _apply_dedup(dst0, dedup_strategy)
+						if dst is None:
+							logger.info("skip existing (dedup=skip): %s", dst0)
+							nonlocal skipped
+							skipped += 1
+							return
+						if keep_source:
+							await asyncio.to_thread(shutil.copy2, src, dst)
+							nonlocal copied
+							copied += 1
+							logger.info("copy2: %s -> %s", src, dst)
+						else:
+							await asyncio.to_thread(shutil.move, str(src), str(dst))
+							nonlocal moved
+							moved += 1
+							logger.info("move: %s -> %s", src, dst)
+						nonlocal total
+						total += 1
+				tasks = [asyncio.create_task(move_or_copy_fill(f)) for f in chunk[:take]]
+				await asyncio.gather(*tasks)
+			# 更新 existing 列表中的计数（用于后续分片继续填充）
+			for j in range(len(existing)):
+				if existing[j][0] == chosen:
+					p_dir, o_dt, n_dt, cnt = existing[j]
+					existing[j] = (p_dir, o_dt, n_dt, cnt + take)
+					break
+			start_idx = take
+		# 剩余文件创建新分区
+		remaining = chunk[start_idx:]
+		if remaining:
+			old2 = datetime.fromtimestamp(_safe_get_mtime(remaining[0]))
+			new2 = datetime.fromtimestamp(_safe_get_mtime(remaining[-1]))
+			# 始终使用日期范围命名
+			batch_dir = _range_name(base, old2, new2, part, range_date_format)
+			created_dirs.append(batch_dir)
+			if not dry_run:
+				batch_dir.mkdir(parents=True, exist_ok=True)
+				async def move_or_copy_new(src: Path) -> None:
+					async with sem:
+						if not src.exists():
+							logger.warning("文件在处理过程中被删除: %s", src)
+							return
+						dst0 = batch_dir / src.name
+						dst = _apply_dedup(dst0, dedup_strategy)
+						if dst is None:
+							logger.info("skip existing (dedup=skip): %s", dst0)
+							nonlocal skipped
+							skipped += 1
+							return
+						if keep_source:
+							await asyncio.to_thread(shutil.copy2, src, dst)
+							nonlocal copied
+							copied += 1
+							logger.info("copy2: %s -> %s", src, dst)
+						else:
+							await asyncio.to_thread(shutil.move, str(src), str(dst))
+							nonlocal moved
+							moved += 1
+							logger.info("move: %s -> %s", src, dst)
+						nonlocal total
+						total += 1
+				tasks = [asyncio.create_task(move_or_copy_new(f)) for f in remaining]
+				await asyncio.gather(*tasks)
+			logger.info("created batch: %s (%d files)", batch_dir, len(remaining))
+			part += 1
 	logger.info("organize completed: processed=%d moved=%d copied=%d skipped=%d batches=%d", total, moved, copied, skipped, len(created_dirs))
 	return created_dirs

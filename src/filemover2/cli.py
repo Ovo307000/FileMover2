@@ -92,6 +92,9 @@ def _cmd_watch(app_cfg: AppConfig, auto_mode: Optional[bool] = None) -> None:
 	range_naming = (org.range_naming if org else True)
 	range_date_format = (org.range_date_format if org else "%Y%m%d")
 	fill_previous = (org.fill_previous if org else True)
+	# 获取整理目标目录
+	organize_target_dirs = org.target_dirs if org else []
+	
 	if w.use_async:
 		asyncio.run(start_watching_async(
 			sources=sources,
@@ -114,6 +117,7 @@ def _cmd_watch(app_cfg: AppConfig, auto_mode: Optional[bool] = None) -> None:
 			range_date_format=range_date_format,
 			fill_previous=fill_previous,
 			interested_events=w.interested_events,
+			organize_target_dirs=organize_target_dirs,
 		))
 	else:
 		start_watching(
@@ -137,6 +141,7 @@ def _cmd_watch(app_cfg: AppConfig, auto_mode: Optional[bool] = None) -> None:
 			range_date_format=range_date_format,
 			fill_previous=fill_previous,
 			interested_events=w.interested_events,
+			organize_target_dirs=organize_target_dirs,
 		)
 
 
