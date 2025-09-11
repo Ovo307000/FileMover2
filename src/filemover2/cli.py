@@ -74,15 +74,17 @@ def _elevate_if_needed(enable_admin: bool) -> None:
 		console.print("[yellow]--admin 仅在 Windows 下支持自动提权。[/yellow]")
 
 
-def _cmd_watch(app_cfg: AppConfig) -> None:
+def _cmd_watch(app_cfg: AppConfig, auto_mode: Optional[bool] = None) -> None:
 	if not app_cfg.watch:
 		raise ConfigError("配置中缺少 watch 块")
 	w = app_cfg.watch
 	setup_logging(logging.INFO)
 	sources = [SourceSpec(root=m.source, targets=m.targets) for m in w.mappings]
-	auto_threshold = w.auto_organize.threshold if (w.auto_organize and w.auto_organize.enabled) else None
-	auto_prefix = w.auto_organize.prefix if (w.auto_organize and w.auto_organize.enabled) else None
-	auto_cooldown_s = w.auto_organize.cooldown_s if (w.auto_organize and w.auto_organize.enabled) else 60
+	# 根据 auto_mode 覆盖自动整理开关
+	use_auto = (auto_mode if auto_mode is not None else (w.auto_organize and w.auto_organize.enabled))
+	auto_threshold = w.auto_organize.threshold if use_auto and w.auto_organize else None
+	auto_prefix = w.auto_organize.prefix if use_auto and w.auto_organize else None
+	auto_cooldown_s = w.auto_organize.cooldown_s if use_auto and w.auto_organize else 60
 	if w.use_async:
 		asyncio.run(start_watching_async(
 			sources=sources,
@@ -223,32 +225,21 @@ def _cmd_start_interactive(config_hint: Optional[str]) -> None:
 	state = _load_state()
 	last_mode = state.get("last_mode", "1")
 	console.print("\n[bold]选择启动模式：[/bold]")
-	console.print("1. [cyan]watch[/cyan] - 监听并同步文件")
-	console.print("2. [cyan]organize[/cyan] - 整理文件到时间戳文件夹")
+	console.print("1. [cyan]watch[/cyan] - 仅监听（不自动整理）")
+	console.print("2. [cyan]watch+organize[/cyan] - 监听并按阈值自动整理")
 	console.print("3. [cyan]organize-now[/cyan] - 立即整理（不监听）")
 	mode = Prompt.ask("请选择模式", choices=["1", "2", "3"], default=str(last_mode))
 	state["last_mode"] = mode
 	_save_state(state)
 	
 	if mode == "1":
-		_cmd_watch(cfg)
+		# 仅监听：强制关闭自动整理（不看配置开关）
+		_cmd_watch(cfg, auto_mode=False)
 	elif mode == "2":
-		# 优先使用配置中的 organize 目录列表；若缺失再询问
-		target_dirs: List[Path] = []
-		if cfg.organize and cfg.organize.target_dirs:
-			target_dirs = cfg.organize.target_dirs
-		else:
-			while True:
-				dir_path = Prompt.ask("输入要整理的目录路径（留空结束）")
-				if not dir_path:
-					break
-				target_dirs.append(Path(dir_path))
-			if not target_dirs:
-				console.print("未指定目录，使用配置中的 watch 目标目录")
-				target_dirs = [target for mapping in cfg.watch.mappings for target in mapping.targets]
-		_cmd_organize(cfg, target_dirs, None, None, True, False, False)
+		# 监听 + 自动整理：强制启用（不看配置开关）
+		_cmd_watch(cfg, auto_mode=True)
 	elif mode == "3":
-		# 同 organize，但执行非 dry-run 的立即整理
+		# organize-now 分支保持不变（使用 organize 目录）
 		target_dirs: List[Path] = []
 		if cfg.organize and cfg.organize.target_dirs:
 			target_dirs = cfg.organize.target_dirs
