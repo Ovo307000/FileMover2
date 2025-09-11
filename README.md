@@ -75,3 +75,27 @@ organize:
 - `filemover2 config-wizard`：交互式生成与保存配置，路径规范化为正斜杠。
 - `filemover2 config-validate`：验证配置。
 - `filemover2 config-backup` / `config-restore`：备份与恢复。
+
+## 新增：感兴趣事件过滤（interested_events）
+在 `watch` 配置中可指定触发同步的事件类型：
+
+```yaml
+watch:
+  interested_events: [created, modified, moved, deleted]
+```
+
+- 支持的事件：`created`、`modified`、`moved`、`deleted`
+- 仅当事件属于上述列表时才会触发同步逻辑；未包含的事件将被忽略。
+
+## 新增：文件日志（events.jsonl 和 failures.jsonl）
+程序会在日志目录下追加两类 JSON Lines 文件，便于后续分析与重试：
+
+- `events.jsonl`：记录重要文件事件与关键节点，例如创建/修改/移动/删除。
+- `failures.jsonl`：记录反复重试后仍失败的文件操作（已存在）。
+
+每一行是一条 JSON：
+```json
+{"ts":"2025-09-11T12:00:00.000Z","type":"created","path":"L:/Temp/Source/a.png","is_dir":false}
+```
+
+结合 `filemover2 retry-failures` 可对失败项进行后续重试处理。

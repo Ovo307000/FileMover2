@@ -17,6 +17,10 @@ watch:
   ignore_dotfiles: true              # 忽略 . 开头的文件
   debounce_ms: 200                   # 事件节流（毫秒）
 
+  # 新：感兴趣事件（可选）- 仅这些事件会触发同步/镜像
+  # 支持：created / modified / moved / deleted
+  interested_events: [created, modified, moved, deleted]
+
   auto_organize:                     # 自动整理（可选）
     enabled: true                    # 是否启用
     threshold: 1000                  # 达到该文件数触发分片整理
@@ -32,21 +36,16 @@ watch:
   use_async: true                    # 监听使用 async/await 模式
 
 organize:
-  # 新：支持多个整理根目录（会把这些目录下的文件按 mtime 汇总分批）
-  # 二选一：提供 target_dirs 列表，或保留旧字段 target_dir（单个）
   target_dirs:
+    - "L:/Temp/Move2"
     - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/40000 - 45000"
     - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/45000 - 50000"
     - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/50000 - 55000"
     - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/55000 - 60000"
     - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/60000 - 65000"
     - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/65000 - 70000"
-  # target_dir: "C:/Users/.../Somewhere"   # 兼容旧字段（若提供则视为单个）
-
   chunk_size: 1000                    # 每批文件数（如1000）
   prefix: "batch"                    # 批次目录前缀（可选）
-
-  # 命名模板已移除：统一采用 “最旧日期-最新日期-partNN” 命名，避免冲突
   dry_run: false                      # 仅演示不移动文件
   keep_source: false                  # 整理保留源：复制而非移动
   dedup_strategy: rename              # 去重策略：skip/rename/overwrite

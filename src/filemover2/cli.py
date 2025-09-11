@@ -113,6 +113,7 @@ def _cmd_watch(app_cfg: AppConfig, auto_mode: Optional[bool] = None) -> None:
 			range_naming=range_naming,
 			range_date_format=range_date_format,
 			fill_previous=fill_previous,
+			interested_events=w.interested_events,
 		))
 	else:
 		start_watching(
@@ -135,6 +136,7 @@ def _cmd_watch(app_cfg: AppConfig, auto_mode: Optional[bool] = None) -> None:
 			range_naming=range_naming,
 			range_date_format=range_date_format,
 			fill_previous=fill_previous,
+			interested_events=w.interested_events,
 		)
 
 

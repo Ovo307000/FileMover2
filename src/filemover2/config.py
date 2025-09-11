@@ -32,6 +32,7 @@ class WatchConfig:
 	debounce_ms: int = 200
 	auto_organize: Optional[AutoOrganizeConfig] = None
 	# New options
+	interested_events: List[str] = field(default_factory=lambda: ["created", "modified", "moved", "deleted"])
 	worker_threads: int = 4
 	io_retries: int = 3
 	io_backoff_ms: int = 200
@@ -131,6 +132,13 @@ def _parse_watch(cfg: dict) -> Optional[WatchConfig]:
 	if dedup_strategy not in {"skip", "rename", "overwrite"}:
 		raise ConfigError("watch.dedup_strategy 仅支持 'skip' | 'rename' | 'overwrite'")
 	use_async = bool(cfg.get("use_async", False))
+	interested_events = cfg.get("interested_events") or ["created", "modified", "moved", "deleted"]
+	if not isinstance(interested_events, list) or not all(isinstance(e, str) for e in interested_events):
+		raise ConfigError("watch.interested_events 必须是字符串数组")
+	valid_events = {"created", "modified", "moved", "deleted"}
+	for e in interested_events:
+		if e not in valid_events:
+			raise ConfigError("watch.interested_events 仅支持: created/modified/moved/deleted")
 	return WatchConfig(
 		mappings=mappings,
 		include_patterns=include_patterns,
@@ -138,6 +146,7 @@ def _parse_watch(cfg: dict) -> Optional[WatchConfig]:
 		ignore_dotfiles=ignore_dotfiles,
 		debounce_ms=debounce_ms,
 		auto_organize=auto_organize,
+		interested_events=interested_events,
 		worker_threads=worker_threads,
 		io_retries=io_retries,
 		io_backoff_ms=io_backoff_ms,
