@@ -380,7 +380,7 @@ class SyncEventHandler(FileSystemEventHandler):
 					timestamp_format=getattr(self, '_timestamp_format', "%Y%m%d_%H%M%S"),
 					range_naming=getattr(self, '_range_naming', True),
 					range_date_format=getattr(self, '_range_date_format', "%Y%m%d"),
-					fill_previous=getattr(self, '_fill_previous', True)
+					fill_previous=False  # 简化逻辑，禁用填充
 				))
 				logger.info("auto organize completed: %s", stats)
 				# 只更新该目录的冷却时间

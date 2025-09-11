@@ -197,15 +197,14 @@ def _cmd_organize(app_cfg: AppConfig, dirs: Optional[List[str]], chunk_size_over
 	
 	# 显示统计信息
 	console.print(Panel.fit(
-		f"整理完成！\n"
+		f"简化整理完成！\n"
 		f"处理文件: {stats.processed}\n"
 		f"移动文件: {stats.moved}\n"
 		f"复制文件: {stats.copied}\n"
 		f"跳过文件: {stats.skipped}\n"
 		f"错误文件: {stats.errors}\n"
-		f"创建批次: {stats.batches_created}\n"
-		f"填充文件: {stats.files_filled}",
-		title="整理统计",
+		f"创建批次: {stats.batches_created}",
+		title="简化整理统计",
 		border_style="green" if stats.errors == 0 else "yellow"
 	))
 
