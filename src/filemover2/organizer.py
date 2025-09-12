@@ -78,6 +78,29 @@ def _ensure_unique_dir(path: Path) -> Path:
 		idx += 1
 
 
+def _next_part_index(root: Path, oldest: datetime, newest: datetime, date_fmt: str) -> int:
+	"""扫描 root 下已有相同日期范围的批次，返回下一个可用的 part 序号（从1开始）。"""
+	date_str_old = oldest.strftime(date_fmt)
+	date_str_new = newest.strftime(date_fmt)
+	pattern = re.compile(rf"^{re.escape(date_str_old)}-{re.escape(date_str_new)}-part(\d+)$")
+	max_part = 0
+	try:
+		for p in root.iterdir():
+			if not p.is_dir():
+				continue
+			m = pattern.match(p.name)
+			if m:
+				try:
+					idx = int(m.group(1))
+					if idx > max_part:
+						max_part = idx
+				except ValueError:
+					continue
+	except FileNotFoundError:
+		pass
+	return max_part + 1
+
+
 def _range_name(base: Path, oldest: datetime, newest: datetime, index: int, fmt: str) -> Path:
 	return base / f"{oldest.strftime(fmt)}-{newest.strftime(fmt)}-part{index:02d}"
 
@@ -156,14 +179,18 @@ async def organize_by_mtime_multi_async(target_dirs: Sequence[Path], chunk_size:
 		if not root_valid:
 			continue
 		logger.info("目录 %s 待整理文件: %d", root, len(root_valid))
-		for i in range(0, len(root_valid), chunk_size):
+		# 仅创建满配分区：不足 chunk_size 的尾部文件不创建分区
+		last_full = len(root_valid) - (len(root_valid) % chunk_size)
+		for i in range(0, last_full, chunk_size):
 			batch_files = root_valid[i:i + chunk_size]
 			if not batch_files:
 				continue
 			oldest_dt = datetime.fromtimestamp(_safe_get_mtime(batch_files[0]))
 			newest_dt = datetime.fromtimestamp(_safe_get_mtime(batch_files[-1]))
-			candidate_dir = _range_name(root, oldest_dt, newest_dt, part, range_date_format)
-			batch_dir = _ensure_unique_dir(candidate_dir)
+			# 动态计算下一个 part 序号，避免 (1)(2) 后缀
+			part_index = _next_part_index(root, oldest_dt, newest_dt, range_date_format)
+			candidate_dir = _range_name(root, oldest_dt, newest_dt, part_index, range_date_format)
+			batch_dir = candidate_dir if not candidate_dir.exists() else _ensure_unique_dir(candidate_dir)
 			logger.info("创建分区 %s: %d 个文件 (范围: %s-%s)", batch_dir.name, len(batch_files), oldest_dt.strftime("%Y%m%d"), newest_dt.strftime("%Y%m%d"))
 			if not dry_run:
 				batch_dir.mkdir(parents=True, exist_ok=False)
@@ -180,8 +207,20 @@ async def organize_by_mtime_multi_async(target_dirs: Sequence[Path], chunk_size:
 						dst = _apply_dedup(dst0, dedup_strategy)
 						if dst is None:
 							logger.info("跳过已存在文件 (dedup=skip): %s", dst0)
-							async with stats_lock:
-								stats.skipped += 1
+							# 若配置为移动模式，保持目标无残留，删除源文件
+							if not keep_source and src.exists() and not dry_run:
+								try:
+									await asyncio.to_thread(src.unlink)
+									async with stats_lock:
+										stats.moved += 1
+										stats.processed += 1
+								except Exception as e:
+									logger.error("删除源文件失败 %s: %s", src, e)
+									async with stats_lock:
+										stats.errors += 1
+							else:
+								async with stats_lock:
+									stats.skipped += 1
 							return
 						if not dry_run:
 							if keep_source:
@@ -206,6 +245,10 @@ async def organize_by_mtime_multi_async(target_dirs: Sequence[Path], chunk_size:
 			await asyncio.gather(*tasks, return_exceptions=True)
 			stats.batches_created += 1
 			part += 1
+		# 如有尾部不足 chunk_size 的文件，记录说明但不创建新分区
+		rest = len(root_valid) - last_full
+		if rest > 0:
+			logger.info("目录 %s 剩余 %d 个文件 (< chunk_size=%d)，本次不创建分区", root, rest, chunk_size)
 	
 	logger.info("简化整理完成: 处理=%d 移动=%d 复制=%d 跳过=%d 错误=%d 批次=%d", 
 		stats.processed, stats.moved, stats.copied, stats.skipped, stats.errors, stats.batches_created)
