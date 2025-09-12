@@ -5,48 +5,48 @@
 # - 可使用 filemover2 config-wizard 交互式生成并保存该文件。
 
 watch:
-  mappings:
-    # 每条映射：source -> targets[]
-    - source: "L:/Temp/Source"       # 源目录（被监听）
-      targets:                       # 目标目录列表（镜像写入）
-        - "L:/Temp/Move"
-        - "L:/Temp/Move2"
+    mappings:
+        # 每条映射：source -> targets[]
+        - source: "L:/Temp/Source" # 源目录（被监听）
+          targets: # 目标目录列表（镜像写入）
+              - "L:/Temp/Move"
+              - "L:/Temp/Move2"
 
-  include_patterns: ["*"]           # 包含通配（只有匹配的文件才同步）
-  exclude_patterns: ["*.tmp", "~*"] # 排除通配（匹配的文件将被忽略）
-  ignore_dotfiles: true              # 忽略 . 开头的文件
-  debounce_ms: 200                   # 事件节流（毫秒）
+    include_patterns: ["*"] # 包含通配（只有匹配的文件才同步）
+    exclude_patterns: ["*.tmp", "~*"] # 排除通配（匹配的文件将被忽略）
+    ignore_dotfiles: true # 忽略 . 开头的文件
+    debounce_ms: 200 # 事件节流（毫秒）
 
-  # 新：感兴趣事件（可选）- 仅这些事件会触发同步/镜像
-  # 支持：created / modified / moved / deleted
-  interested_events: [created, modified, moved, deleted]
+    # 新：感兴趣事件（可选）- 仅这些事件会触发同步/镜像
+    # 支持：created / modified / moved / deleted
+    interested_events: [created, moved]
 
-  auto_organize:                     # 自动整理（可选）
-    enabled: true                    # 是否启用
-    threshold: 1000                  # 达到该文件数触发分片整理
-    cooldown_s: 60                   # 触发后的冷却时间（秒）
-    prefix: "batch"                  # 批次目录前缀（可选）
+    auto_organize: # 自动整理（可选）
+        enabled: true # 是否启用
+        threshold: 1000 # 达到该文件数触发分片整理
+        cooldown_s: 60 # 触发后的冷却时间（秒）
+        prefix: "batch" # 批次目录前缀（可选）
 
-  worker_threads: 4                  # 线程版工作者并发数（watch --async 仍可用）
-  io_retries: 3                      # IO 重试次数
-  io_backoff_ms: 200                 # 初始退避毫秒，指数增长，最大 5s
-  verify_mode: size                  # 完整性校验：size 或 none
-  keep_source: false                 # 监听保留源：不执行删除；移动事件按复制处理
-  dedup_strategy: rename             # 去重策略：skip/rename/overwrite
-  use_async: true                    # 监听使用 async/await 模式
+    worker_threads: 4 # 线程版工作者并发数（watch --async 仍可用）
+    io_retries: 3 # IO 重试次数
+    io_backoff_ms: 200 # 初始退避毫秒，指数增长，最大 5s
+    verify_mode: size # 完整性校验：size 或 none
+    keep_source: false # 监听保留源：不执行删除；移动事件按复制处理
+    dedup_strategy: rename # 去重策略：skip/rename/overwrite
+    use_async: true # 监听使用 async/await 模式
 
 organize:
-  target_dirs:
-    - "L:/Temp/Move2"
-    - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/40000 - 45000"
-    - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/45000 - 50000"
-    - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/50000 - 55000"
-    - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/55000 - 60000"
-    - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/60000 - 65000"
-    - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/65000 - 70000"
-  chunk_size: 1000                    # 每批文件数（如1000）
-  prefix: "batch"                    # 批次目录前缀（可选）
-  dry_run: false                      # 仅演示不移动文件
-  keep_source: false                  # 整理保留源：复制而非移动
-  dedup_strategy: rename              # 去重策略：skip/rename/overwrite
-  use_async: true                     # 整理使用 async/await 模式
+    target_dirs:
+        - "L:/Temp/Move2"
+        - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/40000 - 45000"
+        - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/45000 - 50000"
+        - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/50000 - 55000"
+        - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/55000 - 60000"
+        - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/60000 - 65000"
+        - "C:/Users/solow/OneDrive/Image/Anime/Comfy UI/R - 18/65000 - 70000"
+    chunk_size: 1000 # 每批文件数（如1000）
+    prefix: "batch" # 批次目录前缀（可选）
+    dry_run: false # 仅演示不移动文件
+    keep_source: false # 整理保留源：复制而非移动
+    dedup_strategy: rename # 去重策略：skip/rename/overwrite
+    use_async: true # 整理使用 async/await 模式
